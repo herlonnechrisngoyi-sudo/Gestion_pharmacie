@@ -1,0 +1,195 @@
+name: 🚀 Build & Release
+
+# ─── Déclencheurs ─────────────────────────────────────────────────────────────
+on:
+  push:
+    tags:
+      - "v*"           # Se déclenche sur tout tag de type v1.0.0, v2.3.1-rc1, etc.
+  workflow_dispatch:   # Déclenchement manuel depuis l'interface GitHub (pour tests)
+    inputs:
+      version:
+        description: "Version à construire (ex: 1.2.3)"
+        required: true
+        default: "0.0.0-dev"
+
+# ─── Permissions ──────────────────────────────────────────────────────────────
+permissions:
+  contents: write    # Requis pour créer/mettre à jour une Release GitHub
+
+# ─── Jobs ─────────────────────────────────────────────────────────────────────
+jobs:
+  # ══════════════════════════════════════════════════════════════════════════════
+  # Job 1 : Build, Test, Publish
+  # ══════════════════════════════════════════════════════════════════════════════
+  build:
+    name: 🔨 Build & Test (Windows x64)
+    runs-on: windows-latest
+
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+
+    steps:
+      # ── 1. Checkout du code source ──────────────────────────────────────────
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Récupère tout l'historique (utile pour GitVersion si utilisé)
+
+      # ── 2. Extraction de la version depuis le tag ────────────────────────────
+      - name: 🏷️ Extraire la version
+        id: get_version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $ver = "${{ github.event.inputs.version }}"
+          } else {
+            # Supprime le préfixe "v" du tag (ex: "v1.2.3" → "1.2.3")
+            $ver = "${{ github.ref_name }}" -replace '^v', ''
+          }
+          echo "version=$ver" >> $env:GITHUB_OUTPUT
+          Write-Host "Version détectée : $ver"
+
+      # ── 3. Configuration du SDK .NET 10 ─────────────────────────────────────
+      - name: ⚙️ Configurer .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # ── 4. Restauration des dépendances NuGet ───────────────────────────────
+      - name: 📦 Restaurer les packages NuGet
+        run: dotnet restore GestionPharmacie.slnx
+
+      # ── 5. Build de validation (Debug) ──────────────────────────────────────
+      - name: 🏗️ Build (Debug)
+        run: dotnet build GestionPharmacie.slnx -c Debug --no-restore -v minimal
+
+      # ── 6. Exécution des tests ───────────────────────────────────────────────
+      - name: 🧪 Exécuter les tests
+        run: |
+          dotnet test GestionPharmacie.slnx -c Debug --no-build -v minimal `
+            --logger "trx;LogFileName=test-results.trx" `
+            --results-directory ./TestResults
+
+      # ── 7. Publication des résultats de tests (en cas d'échec) ───────────────
+      - name: 📊 Publier les résultats de tests
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: ./TestResults/*.trx
+          retention-days: 7
+
+      # ── 8. Publication self-contained, single-file, win-x64 ─────────────────
+      - name: 🚀 Publier l'application (self-contained)
+        run: |
+          dotnet publish GestionPharmacie.UI/GestionPharmacie.UI.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:AssemblyVersion=${{ steps.get_version.outputs.version }} `
+            -p:FileVersion=${{ steps.get_version.outputs.version }} `
+            -p:InformationalVersion=${{ steps.get_version.outputs.version }} `
+            -o publish `
+            -v minimal
+
+      # ── 9. Copie des fichiers de distribution ───────────────────────────────
+      - name: 📋 Copier LICENSE, README, NOTICES
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE              publish\ -ErrorAction SilentlyContinue
+          Copy-Item README.md            publish\ -ErrorAction SilentlyContinue
+          Copy-Item THIRD-PARTY-NOTICES.txt publish\ -ErrorAction SilentlyContinue
+
+      # ── 10. Création de l'archive ZIP ────────────────────────────────────────
+      - name: 🗜️ Créer l'archive ZIP
+        shell: pwsh
+        run: |
+          $zipName = "GestionPharmacie-v${{ steps.get_version.outputs.version }}-win-x64.zip"
+          Compress-Archive -Path publish\* -DestinationPath $zipName
+          Write-Host "Archive créée : $zipName"
+
+      # ── 11. (Optionnel) Build Inno Setup ─────────────────────────────────────
+      # Décommentez ce bloc pour générer l'installateur .exe via Inno Setup
+      # (Inno Setup est préinstallé sur windows-latest)
+      #
+      # - name: 📦 Compiler l'installateur Inno Setup
+      #   shell: pwsh
+      #   run: |
+      #     $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+      #     & $iscc installer\setup.iss `
+      #       /DAppVersion=${{ steps.get_version.outputs.version }} `
+      #       /DPublishDir=..\publish
+      #
+      # - name: ⬆️ Upload de l'installateur
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: installer
+      #     path: dist\GestionPharmacie-v*-Setup.exe
+
+      # ── 12. Upload de l'artefact ZIP ─────────────────────────────────────────
+      - name: ⬆️ Upload de l'artefact ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: GestionPharmacie-win-x64
+          path: "GestionPharmacie-v${{ steps.get_version.outputs.version }}-win-x64.zip"
+          retention-days: 30
+
+  # ══════════════════════════════════════════════════════════════════════════════
+  # Job 2 : Création de la GitHub Release et attachement des artefacts
+  # ══════════════════════════════════════════════════════════════════════════════
+  release:
+    name: 🎉 Créer la Release GitHub
+    needs: build
+    runs-on: ubuntu-latest
+    # Ne s'exécute que sur un vrai tag (pas sur workflow_dispatch sans tag)
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      # ── 1. Téléchargement de l'artefact ZIP ──────────────────────────────────
+      - name: ⬇️ Télécharger l'artefact ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: GestionPharmacie-win-x64
+          path: ./artifacts
+
+      # ── 2. Création de la Release et attachement du ZIP ──────────────────────
+      - name: 🚀 Créer la Release GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "GestionPharmacie v${{ needs.build.outputs.version }}"
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          body: |
+            ## 🏥 GestionPharmacie v${{ needs.build.outputs.version }}
+
+            ### 📥 Téléchargement
+
+            | Fichier | Description |
+            |---------|-------------|
+            | `GestionPharmacie-v${{ needs.build.outputs.version }}-win-x64.zip` | Exécutable autonome Windows 64-bit (pas d'installation requise) |
+
+            ### ✅ Prérequis
+            - Windows 10 x64 ou supérieur
+            - **Aucune installation de .NET requise** (runtime intégré)
+
+            ### 🚀 Installation rapide
+            1. Téléchargez et extrayez le fichier `.zip`
+            2. Double-cliquez sur `GestionPharmacie.exe`
+            3. Connectez-vous avec `admin / admin` et changez le mot de passe
+
+            ### 📋 Contenu de l'archive
+            - `GestionPharmacie.exe` — Application principale
+            - `LICENSE` — Licence MIT
+            - `README.md` — Documentation
+            - `THIRD-PARTY-NOTICES.txt` — Licences des composants tiers
+
+            ---
+            *Généré automatiquement par GitHub Actions*
+          files: |
+            ./artifacts/GestionPharmacie-v${{ needs.build.outputs.version }}-win-x64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

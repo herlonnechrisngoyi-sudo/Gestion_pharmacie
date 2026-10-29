@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="GestionPharmacie.BLL/GestionPharmacie.BLL.csproj" />
+  <Project Path="GestionPharmacie.DAL/GestionPharmacie.DAL.csproj" />
+  <Project Path="GestionPharmacie.Tests/GestionPharmacie.Tests.csproj" />
+  <Project Path="GestionPharmacie.UI/GestionPharmacie.UI.csproj" />
+</Solution>
